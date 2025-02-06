@@ -11,3 +11,9 @@ fastembed
 pdfplumber
 sentence-transformers
 elevenlabs
+pymupdf4llm
+langchain_ollama
+langchain_core
+logging
+langchain_community
+langchain_ollama
