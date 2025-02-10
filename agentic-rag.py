@@ -1,11 +1,4 @@
-## 1. Ingest PDF Files
-# 2. Extract Text from PDF Files and split into small chunks
-# 3. Send the chunks to the embedding model
-# 4. Save the embeddings to a vector database
-# 5. Perform similarity search on the vector database to find similar documents
-# 6. retrieve the similar documents and present them to the user
-## run pip install -r requirements.txt to install the required packages
-import streamlit as st
+
 import pymupdf4llm
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document as LangChainDocument
@@ -21,6 +14,8 @@ import os
 import logging
 # from langchain.output_parsers import PydanticOutputParser
 from langchain_core.output_parsers import JsonOutputParser
+import json
+import sys
 
 
 
@@ -29,7 +24,8 @@ from langchain_core.output_parsers import JsonOutputParser
 logging.basicConfig(level=logging.INFO)
 
 #constants
-DOC_PATH = "./data/Sample_Invoice_2.pdf" 
+# DOC_PATH = "/Users/ranjanapriya/Documents/python/RAG/data/Sample_Invoice_2.pdf" 
+DOC_PATH = sys.argv[2]
 model = "llama3.2"
 EMBEDDING_MODEL = "nomic-embed-text"
 VECTOR_STORE_NAME = "Invoice-rag"
@@ -66,9 +62,9 @@ def split_documents(documents):
 
 
 # ===== Add to vector database ===
-@st.cache_resource
+
 def load_vector_db():
-    ollama.pull(EMBEDDING_MODEL)
+    # ollama.pull(EMBEDDING_MODEL)
 
     embedding = OllamaEmbeddings(model=EMBEDDING_MODEL)
     logging.info({os.path.exists(PERSIST_DIRECTORY)})
@@ -110,9 +106,9 @@ def create_retriever(vector_db, llm):
    
     1. Generate five different versions of the given Original question to retrieve relevant documents from a vector database.
 
-    By generating multiple perspectives on the user question, your goal is to help the user overcome some of the limitations of distance-based similarity search. As an Invoice assistant, you are obliged to provide the invoice number and customer name & address to the user for each request.
+    By generating multiple perspectives on the user question, your goal is to help the user overcome some of the limitations of distance-based similarity search.
 
-    Original question: {question}
+    Original question: {question} 
 
     Generated Questions:
     1. [Rephrased question 1]
@@ -153,34 +149,22 @@ def create_chain(retriever, llm):
   ]
 }"""
 
-    # RAG prompt
     template = """<|begin_of_text|>
     <|start_header_id|>system<|end_header_id|>
-    Based on the values from retriever, map those values to a structured JSON format with different field names.And produce the results in given template format.
+    You are an AI assistant that extracts invoice details and outputs them in strict JSON format. **DO NOT** include any extra text, explanations, or formatting beyond the JSON output.
 
-### **Retrieve Rules:**
-- **Invoice No → "invoice_id"**  
-- **Invoice Period From → "date_issued"**  
-- **Invoice Period To → "payment_due"**  
-- **Gross Amount incl.VAT → "total_payable"**  
-- **Currency → "currency_code"**  
-- **Vendor Name → "supplier_name"**  
-- **Vendor Address → "supplier_address"**  
-- **Customer Name → "buyer_name"**  
-- **Customer Address → "buyer_address"**  
-- **Line Items (Service Description, Quantity, Total Amount) → "items" (array format)**  
+    - You will be given data reterived from vector db. Your task is to transform this data into the following JSON schema:
+    {json_template}
 
-- Only return a well-formed JSON object matching this schema:
-{json_template}
+    - Follow these rules:
+    1. Map the raw data fields to the schema fields. For example:
+        - If the raw data contains "Invoice No", map it to "invoice_id".
+        - If the raw data contains "Date",map it to "date_issued"
+        - If the raw data contains "Service Description", map it to "items".
+    2. If a field in the schema is missing in the raw data, use an empty string `""`.
+    3. Do not invent values. Use only the data provided in the context.
+    4. Ensure the output is a well-formed JSON object.
 
-### **Instructions:**
-- Retrieve values **precisely** from the vector db.
-- Map them **correctly** to the corresponding JSON fields.
-- Ensure the output is **structured and formatted properly**.
-- If a field is missing in the document, return an empty string `""`.
-- Output only the JSON structure without explanations or additional formatting.
-- Use **only** the data retrieved from vector DB. Do not generate or assume any missing values.
-- The output should be **only** the JSON structure without any explanations or formatting as code.
     <|eot_id|>
 
     <|start_header_id|>Human<|end_header_id|>
@@ -189,6 +173,7 @@ def create_chain(retriever, llm):
     <|eot_id|>
     <|start_header_id|>assistant<|end_header_id|>
     """
+
 
     #Wrapper for langchain
     prompt = ChatPromptTemplate.from_template(template)
@@ -200,7 +185,7 @@ def create_chain(retriever, llm):
         "question": RunnablePassthrough(),
     }
     | prompt.partial(json_template=json_template)  # Pass json_template as a static value
-    | ChatOllama(model=model, stop=["<|eot_id|>"])
+    | ChatOllama(model=model, stop=["<|eot_id|>"], format="json")
     | JsonOutputParser()
 )
 
@@ -208,40 +193,52 @@ def create_chain(retriever, llm):
     return chain
 
 def main():
-    st.title("Invoice Assistant")
     
-    # User input
-    user_input = st.text_input("Enter your question:", "")
+    try:
+    #   Load the vector database
+      vector_db = load_vector_db()
+      if vector_db is None:
+          print("Failed to load or create the vector database.")
+          return
+      
+      #filename
+      filename = os.path.splitext(sys.argv[1])[0]
+      # set up our model to use
+      llm = ChatOllama(model=model)
 
-    if user_input:
-        with st.spinner("Generating response..."):
-            try:
-                # Load the vector database
-                vector_db = load_vector_db()
-                if vector_db is None:
-                    st.error("Failed to load or create the vector database.")
-                    return
+      # Create the retriever
+      retriever = create_retriever(vector_db, llm)
 
-                # set up our model to use
-                llm = ChatOllama(model=model)
+      # Create the chain with preserved syntax
+      chain = create_chain(retriever, llm)
 
-                # Create the retriever
-                retriever = create_retriever(vector_db, llm)
+      # res = chain.invoke(input=("What is this document about?"))
+      inputtext = f"Show Invoice {filename} in JSON output with template"
+      print(inputtext)
+      response = chain.invoke(input=inputtext)
 
-                # Create the chain with preserved syntax
-                chain = create_chain(retriever, llm)
+      #st.markdown("**Assistant:**")÷
+      print(response)
+      #st.json(response)
+      
+    # Define the folder where you want to save the file
+      folder = "/Users/ranjanapriya/Desktop/InvoiceJSON"  # Replace with your target folder path
 
-                # res = chain.invoke(input=("What is this document about?"))
-                response = chain.invoke(input=user_input)
+        # Make sure the folder exists (create it if necessary)
+      os.makedirs(folder, exist_ok=True)
 
-                st.markdown("**Assistant:**")
-                print(response)
-                st.json(response)
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-    else:
-        st.info("Please enter a question to get started.")
+        # Define the file path
+      filename = f"{filename}.json"
+      file_path = os.path.join(folder, filename)
 
+        # Save the JSON data to the file
+      with open(file_path, "w") as file:
+        json.dump(response, file, indent=4)
+
+        print(f"JSON file saved at {file_path}") 
+    except Exception as e:
+      print(f"An error occurred: {str(e)}")
+    
 
 if __name__ == "__main__":
     main()
